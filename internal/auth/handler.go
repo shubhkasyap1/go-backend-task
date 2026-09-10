@@ -92,25 +92,35 @@ func (h *Handler) Login(c *gin.Context) {
 	)
 
 	if err != nil {
-		switch {
-		case errors.Is(err, ErrAccountLocked):
-			c.JSON(http.StatusLocked, gin.H{
-				"error": "account is temporarily locked",
-			})
+	switch {
+	case errors.Is(err, ErrAccountLocked):
+		c.JSON(http.StatusLocked, gin.H{
+			"error": "account is temporarily locked",
+		})
 
-		case errors.Is(err, ErrInvalidCredentials):
-			c.JSON(http.StatusUnauthorized, gin.H{
-				"error": "invalid username or password",
-			})
+	case errors.Is(err, ErrInvalidCredentials):
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error": "invalid username or password",
+		})
 
-		default:
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"error": "login failed",
-			})
-		}
+	case errors.Is(err, ErrMFARequired):
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error": "2FA code is required",
+		})
 
-		return
+	case errors.Is(err, ErrInvalidTOTP):
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error": "invalid 2FA code",
+		})
+
+	default:
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "login failed",
+		})
 	}
+
+	return
+}
 
 	c.JSON(http.StatusOK, gin.H{
 		"message": "login successful",
@@ -244,11 +254,9 @@ func (h *Handler) EnableMFA(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"message": "MFA secret generated",
-		"mfa": gin.H{
-			"secret":      key.Secret(),
-			"otpauth_url": key.URL(),
-		},
+		"message": "MFA setup initiated",
+		"secret":  key.Secret(),
+		"url":     key.URL(),
 	})
 }
 
