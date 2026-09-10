@@ -76,6 +76,10 @@ func main() {
 	{
 		protectedRoutes.GET("/me", authHandler.Me)
 		protectedRoutes.POST("/logout", authHandler.Logout)
+
+		protectedRoutes.POST("/enable-2fa", authHandler.EnableMFA)
+		protectedRoutes.POST("/disable-2fa", authHandler.DisableMFA)
+		protectedRoutes.POST("/verify-2fa", authHandler.VerifyMFA)
 	}
 
 	log.Printf("Server running on :%s", cfg.AppPort)

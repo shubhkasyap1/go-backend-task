@@ -24,3 +24,7 @@ type LoginRequest struct {
 	Username string `json:"username" binding:"required"`
 	Password string `json:"password" binding:"required"`
 }
+
+type TOTPRequest struct {
+	Code string `json:"code" binding:"required,len=6"`
+}

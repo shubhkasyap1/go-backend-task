@@ -15,6 +15,10 @@ type Handler struct {
 	sessionRepo *SessionRepository
 }
 
+type TOTPRequest struct {
+	Code string `json:"code" binding:"required,len=6"`
+}
+
 func NewHandler(
 	service *Service,
 	sessionRepo *SessionRepository,
@@ -197,5 +201,135 @@ func (h *Handler) Logout(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"message": "logout successful",
+	})
+}
+
+func (h *Handler) EnableMFA(c *gin.Context) {
+	value, exists := c.Get("user")
+
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error": "not authenticated",
+		})
+		return
+	}
+
+	foundUser, ok := value.(*user.User)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "invalid user data",
+		})
+		return
+	}
+
+	if foundUser.MFAEnabled {
+		c.JSON(http.StatusConflict, gin.H{
+			"error": "MFA is already enabled",
+		})
+		return
+	}
+
+	key, err := h.service.EnableMFA(
+		c.Request.Context(),
+		foundUser.ID,
+		foundUser.Username,
+	)
+
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "failed to enable MFA",
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "MFA secret generated",
+		"mfa": gin.H{
+			"secret":      key.Secret(),
+			"otpauth_url": key.URL(),
+		},
+	})
+}
+
+func (h *Handler) DisableMFA(c *gin.Context) {
+	value, exists := c.Get("user")
+
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error": "not authenticated",
+		})
+		return
+	}
+
+	foundUser, ok := value.(*user.User)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "invalid user data",
+		})
+		return
+	}
+
+	if !foundUser.MFAEnabled {
+		c.JSON(http.StatusConflict, gin.H{
+			"error": "MFA is already disabled",
+		})
+		return
+	}
+
+	if err := h.service.DisableMFA(
+		c.Request.Context(),
+		foundUser.ID,
+	); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "failed to disable MFA",
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "MFA disabled successfully",
+	})
+}
+
+
+func (h *Handler) VerifyMFA(c *gin.Context) {
+	userValue, exists := c.Get("user")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error": "unauthorized",
+		})
+		return
+	}
+
+	currentUser, ok := userValue.(*user.User)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "invalid user context",
+		})
+		return
+	}
+
+	var req user.TOTPRequest
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "code must be a 6-digit number",
+		})
+		return
+	}
+
+	if err := h.service.VerifyMFA(
+		c.Request.Context(),
+		currentUser.ID,
+		req.Code,
+	); err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error": err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "2FA code verified successfully",
 	})
 }

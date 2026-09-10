@@ -264,3 +264,59 @@ func (r *Repository) FindByID(
 
 	return user, nil
 }
+
+func (r *Repository) EnableMFA(
+	ctx context.Context,
+	userID string,
+	secret string,
+) error {
+
+	query := `
+		UPDATE users
+		SET
+			mfa_enabled = TRUE,
+			mfa_secret = $1,
+			updated_at = NOW()
+		WHERE id = $2
+	`
+
+	_, err := r.db.Exec(
+		ctx,
+		query,
+		secret,
+		userID,
+	)
+
+	if err != nil {
+		return fmt.Errorf("failed to enable MFA: %w", err)
+	}
+
+	return nil
+}
+
+func (r *Repository) DisableMFA(
+	ctx context.Context,
+	userID string,
+) error {
+
+	query := `
+		UPDATE users
+		SET
+			mfa_enabled = FALSE,
+			mfa_secret = NULL,
+			updated_at = NOW()
+		WHERE id = $1
+	`
+
+	_, err := r.db.Exec(
+		ctx,
+		query,
+		userID,
+	)
+
+	if err != nil {
+		return fmt.Errorf("failed to disable MFA: %w", err)
+	}
+
+	return nil
+}

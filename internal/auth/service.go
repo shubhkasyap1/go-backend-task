@@ -1,12 +1,16 @@
 package auth
 
 import (
+	"fmt"
 	"context"
 	"errors"
 	"strings"
 	"time"
 
+	"github.com/pquerna/otp"
+
 	"github.com/shubhkasyap1/go-backend-task/internal/user"
+	
 )
 
 var (
@@ -144,4 +148,67 @@ func (s *Service) Login(
 	foundUser.LastLoginAt = &session.CreatedAt
 
 	return foundUser, session, nil
+}
+
+func (s *Service) EnableMFA(
+	ctx context.Context,
+	userID string,
+	username string,
+) (*otp.Key, error) {
+
+	key, err := GenerateTOTP(username)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := s.userRepo.EnableMFA(
+		ctx,
+		userID,
+		key.Secret(),
+	); err != nil {
+		return nil, err
+	}
+
+	return key, nil
+}
+
+func (s *Service) DisableMFA(
+	ctx context.Context,
+	userID string,
+) error {
+
+	return s.userRepo.DisableMFA(
+		ctx,
+		userID,
+	)
+}
+
+// func (s *Service) VerifyMFA(
+// 	code string,
+// 	secret string,
+// ) bool {
+
+// 	return ValidateTOTP(code, secret)
+// }
+
+
+func (s *Service) VerifyMFA(ctx context.Context, userID string, code string) error {
+	foundUser, err := s.userRepo.FindByID(ctx, userID)
+	if err != nil {
+		return err
+	}
+
+	if !foundUser.MFAEnabled {
+		return fmt.Errorf("2FA is not enabled")
+	}
+
+	if foundUser.MFASecret == nil || *foundUser.MFASecret == "" {
+		return fmt.Errorf("2FA secret is missing")
+	}
+
+	if !ValidateTOTP(code, *foundUser.MFASecret) {
+		return fmt.Errorf("invalid 2FA code")
+	}
+
+	return nil
 }
