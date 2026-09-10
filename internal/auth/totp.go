@@ -1,14 +1,14 @@
 package auth
 
 import (
-	"errors"
+	// "errors"
 	"fmt"
 
 	"github.com/pquerna/otp"
 	"github.com/pquerna/otp/totp"
 )
 
-var ErrInvalidTOTP = errors.New("invalid authentication code")
+// var ErrInvalidTOTP = errors.New("invalid authentication code")
 
 func GenerateTOTP(username string) (*otp.Key, error) {
 	key, err := totp.Generate(totp.GenerateOpts{

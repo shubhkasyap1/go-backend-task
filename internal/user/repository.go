@@ -42,8 +42,9 @@ func (r *Repository) Create(
 			username,
 			password_hash,
 			mfa_enabled,
-			mfa_secret,
-			failed_login_attempts,
+mfa_secret,
+mfa_pending_secret,
+failed_login_attempts,
 			locked_until,
 			last_login_at,
 			created_at,
@@ -61,6 +62,7 @@ func (r *Repository) Create(
 		&user.PasswordHash,
 		&user.MFAEnabled,
 		&user.MFASecret,
+		&user.MFAPendingSecret,
 		&user.FailedLoginAttempts,
 		&user.LockedUntil,
 		&user.LastLoginAt,
@@ -92,8 +94,9 @@ func (r *Repository) FindByUsername(
 			username,
 			password_hash,
 			mfa_enabled,
-			mfa_secret,
-			failed_login_attempts,
+mfa_secret,
+mfa_pending_secret,
+failed_login_attempts,
 			locked_until,
 			last_login_at,
 			created_at,
@@ -112,6 +115,7 @@ func (r *Repository) FindByUsername(
 		&user.PasswordHash,
 		&user.MFAEnabled,
 		&user.MFASecret,
+		&user.MFAPendingSecret,
 		&user.FailedLoginAttempts,
 		&user.LockedUntil,
 		&user.LastLoginAt,
@@ -227,8 +231,9 @@ func (r *Repository) FindByID(
 			username,
 			password_hash,
 			mfa_enabled,
-			mfa_secret,
-			failed_login_attempts,
+mfa_secret,
+mfa_pending_secret,
+failed_login_attempts,
 			locked_until,
 			last_login_at,
 			created_at,
@@ -247,6 +252,7 @@ func (r *Repository) FindByID(
 		&user.PasswordHash,
 		&user.MFAEnabled,
 		&user.MFASecret,
+		&user.MFAPendingSecret,
 		&user.FailedLoginAttempts,
 		&user.LockedUntil,
 		&user.LastLoginAt,
@@ -316,6 +322,90 @@ func (r *Repository) DisableMFA(
 
 	if err != nil {
 		return fmt.Errorf("failed to disable MFA: %w", err)
+	}
+
+	return nil
+}
+
+func (r *Repository) SetPendingMFA(
+	ctx context.Context,
+	userID string,
+	secret string,
+) error {
+	query := `
+		UPDATE users
+		SET
+			mfa_pending_secret = $1,
+			updated_at = NOW()
+		WHERE id = $2
+	`
+
+	_, err := r.db.Exec(
+		ctx,
+		query,
+		secret,
+		userID,
+	)
+
+	if err != nil {
+		return fmt.Errorf("failed to set pending MFA secret: %w", err)
+	}
+
+	return nil
+}
+
+func (r *Repository) ConfirmMFA(
+	ctx context.Context,
+	userID string,
+) error {
+	query := `
+		UPDATE users
+		SET
+			mfa_secret = mfa_pending_secret,
+			mfa_pending_secret = NULL,
+			mfa_enabled = TRUE,
+			updated_at = NOW()
+		WHERE id = $1
+		  AND mfa_pending_secret IS NOT NULL
+	`
+
+	result, err := r.db.Exec(
+		ctx,
+		query,
+		userID,
+	)
+
+	if err != nil {
+		return fmt.Errorf("failed to confirm MFA: %w", err)
+	}
+
+	if result.RowsAffected() == 0 {
+		return fmt.Errorf("no pending MFA setup found")
+	}
+
+	return nil
+}
+
+func (r *Repository) ClearPendingMFA(
+	ctx context.Context,
+	userID string,
+) error {
+	query := `
+		UPDATE users
+		SET
+			mfa_pending_secret = NULL,
+			updated_at = NOW()
+		WHERE id = $1
+	`
+
+	_, err := r.db.Exec(
+		ctx,
+		query,
+		userID,
+	)
+
+	if err != nil {
+		return fmt.Errorf("failed to clear pending MFA secret: %w", err)
 	}
 
 	return nil

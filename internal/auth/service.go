@@ -1,21 +1,22 @@
 package auth
 
 import (
-	"fmt"
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
 	"github.com/pquerna/otp"
 
 	"github.com/shubhkasyap1/go-backend-task/internal/user"
-	
 )
 
 var (
 	ErrInvalidCredentials = errors.New("invalid username or password")
 	ErrAccountLocked      = errors.New("account is temporarily locked")
+	ErrMFARequired        = errors.New("2FA code is required")
+	ErrInvalidTOTP        = errors.New("invalid 2FA code")
 )
 
 type Service struct {
@@ -33,6 +34,7 @@ func NewService(
 	}
 }
 
+// Register creates a new user with a securely hashed password.
 func (s *Service) Register(
 	ctx context.Context,
 	username string,
@@ -67,7 +69,6 @@ func (s *Service) Register(
 		username,
 		passwordHash,
 	)
-
 	if err != nil {
 		return nil, err
 	}
@@ -75,10 +76,27 @@ func (s *Service) Register(
 	return newUser, nil
 }
 
+// Login authenticates a user using username/password.
+// If MFA is enabled, a valid TOTP code is also required.
+//
+// Flow:
+//
+//	Username + Password
+//	       ↓
+//	Password valid?
+//	       ↓
+//	MFA enabled?
+//	  ↓           ↓
+//	 NO          YES
+//	  ↓           ↓
+//	Session    Validate TOTP
+//	              ↓
+//	           Session
 func (s *Service) Login(
 	ctx context.Context,
 	username string,
 	password string,
+	totpCode string,
 	maxAttempts int,
 	lockoutMinutes int,
 	sessionTimeoutMinutes int,
@@ -95,11 +113,13 @@ func (s *Service) Login(
 		return nil, nil, err
 	}
 
+	// Check whether the account is currently locked.
 	if foundUser.LockedUntil != nil &&
 		foundUser.LockedUntil.After(time.Now()) {
 		return nil, nil, ErrAccountLocked
 	}
 
+	// Verify password.
 	if !CheckPassword(password, foundUser.PasswordHash) {
 
 		attempts, err := s.userRepo.RecordFailedLogin(
@@ -110,6 +130,7 @@ func (s *Service) Login(
 			return nil, nil, err
 		}
 
+		// Lock account after maximum failed attempts.
 		if attempts >= maxAttempts {
 			lockUntil := time.Now().Add(
 				time.Duration(lockoutMinutes) * time.Minute,
@@ -129,6 +150,30 @@ func (s *Service) Login(
 		return nil, nil, ErrInvalidCredentials
 	}
 
+	// If MFA is enabled, TOTP is mandatory.
+	if foundUser.MFAEnabled {
+
+		if foundUser.MFASecret == nil ||
+			*foundUser.MFASecret == "" {
+			return nil, nil, errors.New(
+				"2FA is enabled but secret is missing",
+			)
+		}
+
+		if strings.TrimSpace(totpCode) == "" {
+			return nil, nil, ErrMFARequired
+		}
+
+		if !ValidateTOTP(
+			totpCode,
+			*foundUser.MFASecret,
+		) {
+			return nil, nil, ErrInvalidTOTP
+		}
+	}
+
+	// Successful authentication.
+	// Reset failed attempts and update last login time.
 	if err := s.userRepo.ResetLoginAttempts(
 		ctx,
 		foundUser.ID,
@@ -136,6 +181,7 @@ func (s *Service) Login(
 		return nil, nil, err
 	}
 
+	// Create authenticated session.
 	session, err := s.sessionRepo.Create(
 		ctx,
 		foundUser.ID,
@@ -150,6 +196,12 @@ func (s *Service) Login(
 	return foundUser, session, nil
 }
 
+// EnableMFA generates a TOTP secret and stores it as a
+// pending MFA secret.
+//
+// MFA is NOT enabled at this point.
+//
+// The user must first verify a TOTP code using /verify-2fa.
 func (s *Service) EnableMFA(
 	ctx context.Context,
 	userID string,
@@ -158,10 +210,15 @@ func (s *Service) EnableMFA(
 
 	key, err := GenerateTOTP(username)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf(
+			"failed to generate TOTP secret: %w",
+			err,
+		)
 	}
 
-	if err := s.userRepo.EnableMFA(
+	// Store the secret as pending.
+	// Do NOT enable MFA yet.
+	if err := s.userRepo.SetPendingMFA(
 		ctx,
 		userID,
 		key.Secret(),
@@ -172,6 +229,57 @@ func (s *Service) EnableMFA(
 	return key, nil
 }
 
+// VerifyMFA verifies the pending TOTP setup.
+//
+// If the code is correct, the pending secret becomes
+// the active MFA secret and MFA is enabled.
+func (s *Service) VerifyMFA(
+	ctx context.Context,
+	userID string,
+	code string,
+) error {
+
+	code = strings.TrimSpace(code)
+
+	if code == "" {
+		return ErrMFARequired
+	}
+
+	foundUser, err := s.userRepo.FindByID(
+		ctx,
+		userID,
+	)
+	if err != nil {
+		return err
+	}
+
+	// There must be a pending MFA setup.
+	if foundUser.MFAPendingSecret == nil ||
+		*foundUser.MFAPendingSecret == "" {
+		return errors.New("no pending 2FA setup found")
+	}
+
+	// Validate the code against the pending secret.
+	if !ValidateTOTP(
+		code,
+		*foundUser.MFAPendingSecret,
+	) {
+		return ErrInvalidTOTP
+	}
+
+	// Move pending secret to active MFA secret
+	// and enable MFA.
+	if err := s.userRepo.ConfirmMFA(
+		ctx,
+		userID,
+	); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// DisableMFA disables MFA for the user.
 func (s *Service) DisableMFA(
 	ctx context.Context,
 	userID string,
@@ -181,34 +289,4 @@ func (s *Service) DisableMFA(
 		ctx,
 		userID,
 	)
-}
-
-// func (s *Service) VerifyMFA(
-// 	code string,
-// 	secret string,
-// ) bool {
-
-// 	return ValidateTOTP(code, secret)
-// }
-
-
-func (s *Service) VerifyMFA(ctx context.Context, userID string, code string) error {
-	foundUser, err := s.userRepo.FindByID(ctx, userID)
-	if err != nil {
-		return err
-	}
-
-	if !foundUser.MFAEnabled {
-		return fmt.Errorf("2FA is not enabled")
-	}
-
-	if foundUser.MFASecret == nil || *foundUser.MFASecret == "" {
-		return fmt.Errorf("2FA secret is missing")
-	}
-
-	if !ValidateTOTP(code, *foundUser.MFASecret) {
-		return fmt.Errorf("invalid 2FA code")
-	}
-
-	return nil
 }

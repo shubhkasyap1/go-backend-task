@@ -85,6 +85,7 @@ func (h *Handler) Login(c *gin.Context) {
 		c.Request.Context(),
 		request.Username,
 		request.Password,
+		request.TOTPCode,
 		cfg.MaxLoginAttempts,
 		cfg.LockoutMinutes,
 		cfg.SessionTimeoutMinutes,
@@ -291,7 +292,6 @@ func (h *Handler) DisableMFA(c *gin.Context) {
 	})
 }
 
-
 func (h *Handler) VerifyMFA(c *gin.Context) {
 	userValue, exists := c.Get("user")
 	if !exists {
@@ -309,7 +309,7 @@ func (h *Handler) VerifyMFA(c *gin.Context) {
 		return
 	}
 
-	var req user.TOTPRequest
+	var req TOTPRequest
 
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{

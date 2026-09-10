@@ -8,6 +8,7 @@ type User struct {
 	PasswordHash        string     `json:"-"`
 	MFAEnabled          bool       `json:"mfa_enabled"`
 	MFASecret           *string    `json:"-"`
+	MFAPendingSecret    *string    `json:"-"`
 	FailedLoginAttempts int        `json:"failed_login_attempts"`
 	LockedUntil         *time.Time `json:"locked_until"`
 	LastLoginAt         *time.Time `json:"last_login_at"`
@@ -23,6 +24,7 @@ type RegisterRequest struct {
 type LoginRequest struct {
 	Username string `json:"username" binding:"required"`
 	Password string `json:"password" binding:"required"`
+	TOTPCode string `json:"totp_code,omitempty"`
 }
 
 type TOTPRequest struct {
