@@ -77,20 +77,26 @@ func (s *Service) Register(
 	return newUser, nil
 }
 
-// Login authenticates a user using username/password.
-// If MFA is enabled, a valid TOTP code is also required.
+// Login verifies username and password.
+//
+// If MFA is disabled:
+//   username + password -> authenticated session
+//
+// If MFA is enabled:
+//   username + password -> ErrMFARequired
+//   no authenticated session is created.
+//
+// The client must then call VerifyLoginMFA() with the TOTP code.
 func (s *Service) Login(
 	ctx context.Context,
 	username string,
 	password string,
-	totpCode string,
 	maxLoginAttempts int,
 	lockoutMinutes int,
 	sessionTimeoutMinutes int,
 ) (*user.User, *Session, error) {
 
 	username = strings.TrimSpace(username)
-	totpCode = strings.TrimSpace(totpCode)
 
 	// Find user.
 	foundUser, err := s.userRepo.FindByUsername(
@@ -108,7 +114,7 @@ func (s *Service) Login(
 		)
 	}
 
-	// Check whether account is locked.
+	// Check whether account is currently locked.
 	if foundUser.LockedUntil != nil &&
 		time.Now().Before(*foundUser.LockedUntil) {
 
@@ -151,41 +157,23 @@ func (s *Service) Login(
 	}
 
 	// --------------------------------------------------
-	// MFA CHECK
+	// PASSWORD IS CORRECT
 	// --------------------------------------------------
 
-	// MFA disabled:
-	// password authentication is enough.
+	// If MFA is enabled, stop here.
+	//
+	// DO NOT create a session yet.
+	// The user must complete the second authentication
+	// step using the TOTP code.
 	if foundUser.MFAEnabled {
-
-		// MFA enabled but no code supplied.
-		if totpCode == "" {
-			return nil, nil, ErrMFARequired
-		}
-
-		// MFA enabled but secret is missing.
-		if foundUser.MFASecret == nil ||
-			*foundUser.MFASecret == "" {
-
-			return nil, nil, errors.New(
-				"MFA secret is not configured",
-			)
-		}
-
-		// Validate TOTP code.
-		if !ValidateTOTP(
-			totpCode,
-			*foundUser.MFASecret,
-		) {
-			return nil, nil, ErrInvalidTOTP
-		}
+		return foundUser, nil, ErrMFARequired
 	}
 
 	// --------------------------------------------------
-	// LOGIN SUCCESS
+	// MFA DISABLED
+	// Password authentication is enough.
 	// --------------------------------------------------
 
-	// Reset failed attempts and update last login.
 	if err := s.userRepo.ResetLoginAttempts(
 		ctx,
 		foundUser.ID,
@@ -193,7 +181,7 @@ func (s *Service) Login(
 		return nil, nil, err
 	}
 
-	// Create session.
+	// Create authenticated session.
 	session, err := s.sessionRepo.Create(
 		ctx,
 		foundUser.ID,
@@ -213,11 +201,99 @@ func (s *Service) Login(
 	return foundUser, session, nil
 }
 
-// EnableMFA generates a TOTP secret and stores it as
-// a pending MFA secret.
+// VerifyLoginMFA verifies the TOTP code during login.
 //
-// MFA is NOT enabled at this point.
-// The user must verify the TOTP code first.
+// This is different from VerifyMFA().
+//
+// VerifyMFA():
+//     Used when the user is setting up/enabling MFA.
+//
+// VerifyLoginMFA():
+//     Used when an existing MFA-enabled user is logging in.
+func (s *Service) VerifyLoginMFA(
+	ctx context.Context,
+	userID string,
+	code string,
+	sessionTimeoutMinutes int,
+) (*user.User, *Session, error) {
+
+	code = strings.TrimSpace(code)
+
+	if code == "" {
+		return nil, nil, ErrMFARequired
+	}
+
+	// Find user.
+	foundUser, err := s.userRepo.FindByID(
+		ctx,
+		userID,
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// MFA must be enabled.
+	if !foundUser.MFAEnabled {
+		return nil, nil, errors.New("MFA is not enabled")
+	}
+
+	// MFA secret must exist.
+	if foundUser.MFASecret == nil ||
+		*foundUser.MFASecret == "" {
+
+		return nil, nil, errors.New(
+			"MFA secret is not configured",
+		)
+	}
+
+	// Validate TOTP.
+	if !ValidateTOTP(
+		code,
+		*foundUser.MFASecret,
+	) {
+		return nil, nil, ErrInvalidTOTP
+	}
+
+	// --------------------------------------------------
+	// PASSWORD + TOTP ARE BOTH VALID
+	// --------------------------------------------------
+
+	// Reset failed login attempts and update last login.
+	if err := s.userRepo.ResetLoginAttempts(
+		ctx,
+		foundUser.ID,
+	); err != nil {
+		return nil, nil, err
+	}
+
+	// Create authenticated session ONLY after
+	// successful TOTP verification.
+	session, err := s.sessionRepo.Create(
+		ctx,
+		foundUser.ID,
+		time.Duration(sessionTimeoutMinutes)*time.Minute,
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Update returned user object.
+	foundUser.FailedLoginAttempts = 0
+	foundUser.LockedUntil = nil
+
+	now := time.Now()
+	foundUser.LastLoginAt = &now
+
+	return foundUser, session, nil
+}
+
+// EnableMFA generates a TOTP secret and stores it
+// as a pending MFA secret.
+//
+// MFA is NOT enabled yet.
+//
+// The user must verify the generated TOTP code using
+// VerifyMFA() before MFA becomes active.
 func (s *Service) EnableMFA(
 	ctx context.Context,
 	userID string,
@@ -233,7 +309,7 @@ func (s *Service) EnableMFA(
 	}
 
 	// Store secret as pending.
-	// MFA remains disabled.
+	// MFA remains disabled until verification.
 	if err := s.userRepo.SetPendingMFA(
 		ctx,
 		userID,
@@ -247,8 +323,9 @@ func (s *Service) EnableMFA(
 
 // VerifyMFA verifies the pending TOTP setup.
 //
-// If the code is correct, the pending secret becomes
-// the active MFA secret and MFA is enabled.
+// If the code is correct:
+//     pending secret -> active secret
+//     MFA becomes enabled.
 func (s *Service) VerifyMFA(
 	ctx context.Context,
 	userID string,

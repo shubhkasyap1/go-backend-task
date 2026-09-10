@@ -62,6 +62,7 @@ func main() {
 	{
 		authRoutes.POST("/register", authHandler.Register)
 		authRoutes.POST("/login", authHandler.Login)
+		authRoutes.POST("/login/2fa", authHandler.LoginMFA)
 	}
 
 	protectedRoutes := router.Group("/api/v1/auth")

@@ -19,6 +19,13 @@ type TOTPRequest struct {
 	Code string `json:"code" binding:"required,len=6"`
 }
 
+// LoginMFARequest is used for the second step of login
+// when MFA is enabled.
+type LoginMFARequest struct {
+	UserID string `json:"user_id" binding:"required"`
+	Code   string `json:"code" binding:"required,len=6"`
+}
+
 func NewHandler(
 	service *Service,
 	sessionRepo *SessionRepository,
@@ -69,6 +76,16 @@ func (h *Handler) Register(c *gin.Context) {
 	})
 }
 
+// Login performs the first authentication step.
+//
+// MFA disabled:
+//
+//	username + password -> session
+//
+// MFA enabled:
+//
+//	username + password -> MFA_REQUIRED
+//	no session is created yet.
 func (h *Handler) Login(c *gin.Context) {
 	var request user.LoginRequest
 
@@ -85,42 +102,107 @@ func (h *Handler) Login(c *gin.Context) {
 		c.Request.Context(),
 		request.Username,
 		request.Password,
-		request.TOTPCode,
 		cfg.MaxLoginAttempts,
 		cfg.LockoutMinutes,
 		cfg.SessionTimeoutMinutes,
 	)
 
 	if err != nil {
-	switch {
-	case errors.Is(err, ErrAccountLocked):
-		c.JSON(http.StatusLocked, gin.H{
-			"error": "account is temporarily locked",
-		})
 
-	case errors.Is(err, ErrInvalidCredentials):
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"error": "invalid username or password",
-		})
+		if errors.Is(err, ErrAccountLocked) {
+			c.JSON(http.StatusLocked, gin.H{
+				"error": "account is temporarily locked",
+				"code":  "ACCOUNT_LOCKED",
+			})
+			return
+		}
 
-	case errors.Is(err, ErrMFARequired):
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"error": "2FA code is required",
-		})
+		if errors.Is(err, ErrInvalidCredentials) {
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"error": "invalid username or password",
+				"code":  "INVALID_CREDENTIALS",
+			})
+			return
+		}
 
-	case errors.Is(err, ErrInvalidTOTP):
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"error": "invalid 2FA code",
-		})
+		// Password was correct but MFA is enabled.
+		if errors.Is(err, ErrMFARequired) {
+			c.JSON(http.StatusOK, gin.H{
+				"code":    "MFA_REQUIRED",
+				"user_id": foundUser.ID,
+				"message": "2FA verification required",
+			})
+			return
+		}
 
-	default:
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": "login failed",
 		})
+		return
 	}
 
-	return
+	// MFA disabled -> login successful.
+	c.JSON(http.StatusOK, gin.H{
+		"message": "login successful",
+		"session": gin.H{
+			"id":         session.ID,
+			"expires_at": session.ExpiresAt,
+		},
+		"user": gin.H{
+			"id":            foundUser.ID,
+			"username":      foundUser.Username,
+			"mfa_enabled":   foundUser.MFAEnabled,
+			"last_login_at": foundUser.LastLoginAt,
+			"created_at":    foundUser.CreatedAt,
+		},
+	})
 }
+
+// LoginMFA performs the second authentication step.
+//
+// This endpoint is called only after /login returns MFA_REQUIRED.
+func (h *Handler) LoginMFA(c *gin.Context) {
+	var request LoginMFARequest
+
+	if err := c.ShouldBindJSON(&request); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "user_id and 6-digit code are required",
+		})
+		return
+	}
+
+	cfg := config.Load()
+
+	foundUser, session, err := h.service.VerifyLoginMFA(
+		c.Request.Context(),
+		request.UserID,
+		request.Code,
+		cfg.SessionTimeoutMinutes,
+	)
+
+	if err != nil {
+
+		if errors.Is(err, ErrInvalidTOTP) {
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"error": "invalid 2FA code",
+				"code":  "INVALID_TOTP",
+			})
+			return
+		}
+
+		if errors.Is(err, ErrMFARequired) {
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"error": "2FA code is required",
+				"code":  "MFA_REQUIRED",
+			})
+			return
+		}
+
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error": err.Error(),
+		})
+		return
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"message": "login successful",
@@ -300,8 +382,13 @@ func (h *Handler) DisableMFA(c *gin.Context) {
 	})
 }
 
+// VerifyMFA is used when setting up MFA.
+//
+// This is NOT the login MFA endpoint.
+// Login MFA is handled by LoginMFA().
 func (h *Handler) VerifyMFA(c *gin.Context) {
 	userValue, exists := c.Get("user")
+
 	if !exists {
 		c.JSON(http.StatusUnauthorized, gin.H{
 			"error": "unauthorized",
